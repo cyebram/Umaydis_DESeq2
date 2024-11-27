@@ -1,0 +1,333 @@
+---
+title: "Expresión diferencial RNA-seq Ustilago maydis: Infección"
+---
+
+```{r}
+#| label: load-packages
+#| code-fold: true
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(RColorBrewer)
+library(pheatmap)
+library(factoextra)
+library(kableExtra)
+library(plotly)
+library(PoiClaClu)
+library(DT)
+
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("DESeq2")
+library(DESeq2)
+
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("vsn")
+library(vsn)
+
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("Glimma")
+library(Glimma)
+
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("EnhancedVolcano")
+library(EnhancedVolcano)
+
+options(DT.options = list(
+  initComplete = JS("function(settings, json) {",
+  "$(this.api().table().header()).css({'background-color': 
+  '#000', 'color': '#fff'});","}")))
+```
+
+Este flujo de trabajo está basado y es un complemento del [Tutorial de Análisis de Expresión Diferencial en Galaxy](https://sites.google.com/view/bioinformatica-genomica/expresi%C3%B3n-diferencial-rna-seq?authuser=0) de la Dra. Alejandra Rougon Cardozo, para llevar a cabo el DESeq con R.
+
+También está basado en:
+
+[Analyzing RNA-seq data with DESeq2](https://www.bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html) de Michael I. Love, Simon Anders y Wolfgang Huber.
+
+[RNA-seq workflow: gene-level exploratory analysis and differential expression](http://master.bioconductor.org/packages/release/workflows/vignettes/rnaseqGene/inst/doc/rnaseqGene.html) de Michael I.Love, Simon Anders, Vladislav Kim y Wolfgang Huber.
+
+[Panorama general de análisis de datos de RNA-seq con R](https://github.com/ComunidadBioInfo/minicurso_abr_2021) de la Red Mexicana de Bioinformática.
+
+# Importar datos
+
+Se cargan los archivos con la tabla de conteos sin normalizar y se crea una tabla que indica la condición para el análisis (en este caso la infección).
+
+```{r}
+#| code-fold: true
+#| warning: false
+#| message: false
+
+# Se leen los archivos
+
+countdata_df <- read.table("./Data_input/Expressions U maydis.txt", header = TRUE, row.names=1)
+countdata <- as.matrix(countdata_df)
+
+# Es necesario que la columna que contiene los nombres de las muestras se llame "names"
+
+coldata <- read.table("./Data_input/Infecting Plant Phenotype.txt", header=TRUE, row.names=1, sep="\t")
+coldata <- coldata |> mutate(names=row.names(coldata), .before = 1)
+coldata <- coldata |> mutate(Infecting.plant= if_else(Infecting.plant==1, "Si", "No"))
+coldata$Infecting.plant <- factor(coldata$Infecting.plant, levels=c("Si", "No"))
+
+countdata <- countdata[ , coldata$names]
+```
+
+## Matriz de conteos
+
+Características de la matriz de conteos.
+
+```{r}
+#| code-fold: true
+dim(countdata_df)
+```
+
+## Información de la condición experimental
+
+Características de la tabla que indica la condición experimental
+
+```{r}
+#| code-fold: true
+
+glimpse(coldata)
+table(coldata$Infecting.plant)
+```
+
+
+# DESeqDataSet
+
+Con la matriz de conteos y la tabla con la información de la condición experimental se crea un objeto de la clase `DESeqDataSet`, el cual tiene una fórmula de diseño asociada. La formula de diseño indica qué columnas de la tabla de información de las muestras especifican el diseño experimental y cómo se deben utilizar estos factores en el análisis. Aquí se usa la formula `design = ~ Infecting.plant`. A continuación se muestra la información del objeto generado.
+
+```{r}
+#| code-fold: true
+
+dds <- DESeqDataSetFromMatrix(countData = countdata,
+                              colData = coldata,
+                              design = ~ Infecting.plant)
+
+
+dds
+```
+
+A partir de este objeto se puede acceder a la matriz de conteos por medio de las funciones `counts(dds)` o `assay(dds)`; y a la tabla con la información de las muestras con `colData(dds)`.
+
+# Filtro preliminar
+
+En ocasiones la matriz de conteos tiene algunas filas que constan sólo de ceros y es necesario prescindir de ellas, aunque este no es el caso:
+
+
+```{r}
+# Número inicial de filas 
+nrow(dds)
+keep <- rowSums(counts(dds))>1
+dds <- dds[keep, ]
+# Número de filas después del filtro
+nrow(dds)
+```
+
+
+# Análisis de expresión diferencial
+
+El análisis de expresión diferencial se lleva a cabo sobre los conteos sin normalizar por medio de la función `DESeq`:
+
+```{r}
+
+dds <- DESeq(dds)
+dds
+```
+
+Esta función muestra mensajes de los pasos realizados (ver `?DESeq`). Entre los que se encuentran: estimar los factores de tamaño (controlando las diferencias en la profundidad de secuenciación de las muestras), la estimación de los valores de dispersión para cada gen y el ajuste de un modelo lineal generalizado.
+
+El objeto generado es de la clase `DESeqDataSet` que contiene todos los parámetros ajustados y tablas de resultados.
+
+## Tabla de resultados
+
+Al llamar los resultados sin ningún argumento muestra los log2 fold changes y p-values para la última variable en la fórmula del diseño experimental (en este caso sólo es una variable). Si existieran más de dos niveles en esta variable, los resultados mostrarían la tabla de comparación del último nivel respecto al primer nivel.
+
+```{r}
+#| code-fold: true
+res <- results(dds)
+res
+
+```
+
+Es posible extraer la tabla como una `DataFrame`, la cual contiene metadatos con información del significado de las columnas:
+
+```{r}
+#| code-fold: true
+res_df <- results(dds, contrast = c("Infecting.plant", "No", "Si"))
+# Se crea una versión tibble
+res_tibble <- as_tibble(res_df)
+#Se crea una data frame usual
+res_data_frame <- as.data.frame(res_df)
+res_data_frame <- res_data_frame |> mutate(Gen=row.names(res_data_frame), .before = 1)
+mcols(res_df, use.names = TRUE)
+```
+
+La primera columna, `baseMean`, es el promedio de los valores de los conteos normalizados, divididos por los factores de tamaño, tomados de todas las muestras en el `DESeqDataSet`. Las cuatro columnas restantes se refieren a la comparación del nivel `No` sobre el nivel de referencia `Si` para la condición `Infecting.plant`.
+
+La columna `log2FoldChange` es la estimación del tamaño del efecto consecuencia de la condición experimental. Nos dice cuánto parece cambiar la expresión del gen entre las condiciones experimentales. Este valor se reporta en una escala logarítmica con base 2.
+
+La incertidumbre asociada a esta estimación está disponible en la columna `lfcSE`, que es el error estándar del valor estimado del `log2FoldChange`.
+
+El propósito de un análisis de expresión diferencial es comprobar si los datos proporcionan evidencia suficiente para concluir que el `log2FoldChange` es significativamente diferente de cero. `DESeq2` realiza para cada transcrito una prueba de hipótesis para ver si la evidencia es suficiente para rechazar la hipótesis nula (que la diferencia de expresión es cero y que la diferencia observada entre las condiciones es causada simplemente por la variabilidad experimental). 
+
+Como es habitual en estadística, el resultado de esta prueba se reporta por medio de un p-value. `DESeq2` utiliza la corrección de Benjamini-Hochberg (BH) que controla la False Discovery Rate (FDR) : la proporción esperada de falsos positvios entre todas las hipótesis rechazadas, es decir, la FDR mide cuántos de los casos considerados significativos (rechazo de la hipótesis nula) son probablemente falsos. En DESeq se calcula para cada gen un p-value ajustado dado en la columna `padj` y por default considera un treshold de 0.1 para evaluar la hipótesis.
+
+Podemos resumir los resultados con la siguiente línea de código, que proporciona información adicional.
+
+```{r}
+#| code-fold: true
+summary(res)
+```
+
+Como en este caso hay 50 genes cuyo LFC es significativo, se pueden mostrar en una tabla:
+
+
+```{r}
+#| code-fold: true
+
+res_sign <- res_data_frame |> filter(padj<=0.1)
+
+res_sign %>% 
+  datatable(caption = "Differentially expressed genes") |> formatRound(c("baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"), digits = 6)
+```
+
+
+# Gráficas de resultados
+
+## LFC
+
+```{r}
+#| code-fold: true
+
+res_sign <- res_sign |> mutate(lfc_dir=if_else(log2FoldChange > 0, 1, 0))
+res_sign$lfc_dir <- factor(res_sign$lfc_dir)
+
+ggplot(res_sign)+
+  geom_point(aes(x=log2FoldChange, y=Gen, color=lfc_dir), show.legend = FALSE)+
+  theme_bw()
+
+```
+
+
+
+
+
+## MA plot
+
+El MA plot representa la distribución de los coeficientes estimados en el modelo, es decir, la distribución de los genes o transcritos en las comparaciones de interés. 
+
+Este gráfico se puede generar con la función `plotMA()` :
+
+```{r}
+#| code-fold: true
+
+plotMA(res)
+```
+
+O bien, podemos utilizar `ggplot2` para generarla y poder modificar los atributos (se muestra una versión básica):
+
+```{r}
+#| code-fold: true
+
+res_tibble <- mutate(res_tibble, isDE=if_else(padj<0.1, "DE", "nDE", missing="nDE"))
+res_tibble$isDE <- factor(res_tibble$isDE)
+ggplot(res_tibble)+
+  geom_point(aes(baseMean, log2FoldChange, color=isDE), size=2, show.legend = TRUE)+
+  scale_x_log10()+
+  theme_bw()
+```
+
+También es posible generar un MA plot interactivo y gráficas de expresión para genes específicos con el package `Glimma`, para ello es necesario crear una variable `group` que corresponda a los niveles asociados al diseño experimental.
+
+```{r}
+
+group <- colData(dds)$Infecting.plant
+dds$group <- group
+glimmaMA(dds)
+```
+
+## Volcano plot
+
+De manera análoga al MA plot, en el volcano plot se distinguen los genes o transcritos que muestran expresión diferencial entre las condiciones de infección. En las ordenadas se grafica $-log_{10}(padj)$ y en las abscisas el log2FoldChange. Este gráfico se puede realizar por medio de la función [`EnhancedVolcano`](https://bioconductor.org/packages/release/bioc/vignettes/EnhancedVolcano/inst/doc/EnhancedVolcano.html) , a continuación se muestra el volcano plot básico.
+
+```{r}
+#| code-fold: true
+#| fig-height: 8
+
+EnhancedVolcano(res,
+                lab= rownames(res),
+                x='log2FoldChange',
+                y= 'pvalue')
+```
+
+También es posible utilizar el package `Glimma` para una versión interactiva del gráfico.
+
+```{r}
+#| code-fold: true
+
+glimmaVolcano(dds)
+```
+
+A partir de los datos podemos generar el plot con ggplot2.
+
+```{r}
+#| code-fold: true  
+
+res_tibble <- mutate(res_tibble, neglog10padj=if_else(is.na(padj), 0, -log10(padj)))  
+ggplot(res_tibble)+   
+  geom_point(aes(log2FoldChange, neglog10padj, color=isDE), size=2, show.legend = TRUE)+   
+  theme_bw()
+```
+
+
+## Heatmap
+
+Por medio de un heatmap con agrupamiento podemos visualizar la expresión de los genes diferencialmente expresados en términos de las cuentas normalizadas estandarizadas.
+
+```{r}
+#| code-fold: true
+
+# Se filtran los transcritos con expresión diferencial
+significant <- res_data_frame |>  filter(padj < 0.1)
+
+
+##Se extrae la matriz de cuentas normalizadas
+norm_counts <- counts(dds, normalized = T)
+
+##Se filtran las filas que corresponden a los transcritos significativos
+norm_counts <- norm_counts[rownames(significant), ]
+norm_counts <- log2(norm_counts)
+##Generar una tabla de anotaciones que incluye el tipo de células
+annotation_col <- coldata |> dplyr::select(Infecting.plant)
+
+
+my_colour = list( 
+    Infecting.plant = c( Si= "dodgerblue3", No = "firebrick")
+  )
+##Generar el heatmap empleando clustering jerarquico
+pheatmap(norm_counts, 
+         border_color = NA, 
+         scale = "none",
+         clustering_distance_rows = "euclidean", 
+         clustering_distance_cols = "euclidean", 
+         clustering_method = "ward.D2", 
+         show_colnames = T, 
+         show_rownames = F, 
+         fontsize_col = 3,
+         annotation_col = annotation_col,
+         annotation_colors = my_colour)
+```
+
+
